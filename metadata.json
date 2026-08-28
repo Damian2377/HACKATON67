@@ -1,0 +1,6 @@
+{
+  "name": "AforoPUCP",
+  "description": "Encuentra dónde estudiar en el campus PUCP en segundos: aforo en tiempo real por piso, cubículos, enchufes y recomendador inteligente.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
