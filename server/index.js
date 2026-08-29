@@ -165,19 +165,36 @@ app.post('/api/reports/:id/helpful', (req, res) => {
 
 app.post('/api/login', (req, res) => {
   const { code, password } = req.body;
-  const cleanCode = String(code || '').trim().toLowerCase();
-  const db = readDb();
-  const user = db.users.find(
-    (u) =>
-      (u.code.toLowerCase() === cleanCode || u.email.toLowerCase() === cleanCode) &&
-      u.password === password
-  );
-  if (!user) {
-    return res.status(401).json({ error: 'Código o contraseña incorrectos' });
+  const cleanId = String(code || '').trim().toLowerCase();
+  const cleanPassword = String(password || '');
+
+  // La contraseña siempre debe ser un número de exactamente 8 dígitos.
+  const isValidPassword = /^\d{8}$/.test(cleanPassword);
+  if (!isValidPassword) {
+    return res.status(401).json({ error: 'La contraseña debe ser un número de 8 dígitos.' });
   }
-  // No devolvemos la contraseña al frontend, por seguridad.
-  const { password: _omit, ...safeUser } = user;
-  res.json(safeUser);
+
+  const db = readDb();
+
+  // Correo @liderman.com -> entra como Liderman
+  if (cleanId.endsWith('@liderman.com')) {
+    const user = db.users.find((u) => u.role === 'liderman');
+    if (!user) return res.status(404).json({ error: 'No se encontró un usuario Liderman en la base de datos.' });
+    const { password: _omit, ...safeUser } = user;
+    return res.json(safeUser);
+  }
+
+  // Correo @pucp.edu.pe -> entra como Estudiante
+  if (cleanId.endsWith('@pucp.edu.pe')) {
+    const user = db.users.find((u) => u.role === 'student');
+    if (!user) return res.status(404).json({ error: 'No se encontró un usuario estudiante en la base de datos.' });
+    const { password: _omit, ...safeUser } = user;
+    return res.json({ ...safeUser, email: cleanId, name: cleanId.split('@')[0] });
+  }
+
+  return res.status(401).json({
+    error: 'El correo debe terminar en @pucp.edu.pe (estudiante) o @liderman.com (liderman).',
+  });
 });
 
 // ---------------- LIDERMAN ----------------
