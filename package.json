@@ -10,7 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "start": "node server/index.js"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -24,7 +25,8 @@
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
