@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { UserAccount, UserRole } from '../types';
 import { DEMO_STUDENT_USER, DEMO_LIDERMAN_USER } from '../data/authData';
+import { api } from '../api';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserAccount) => void;
@@ -34,7 +35,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -50,43 +51,32 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       return;
     }
 
-    setIsLoading(true);
+    // Validación rápida en el navegador antes de molestar al servidor.
+    const hasValidDomain = cleanId.endsWith('@pucp.edu.pe') || cleanId.endsWith('@liderman.com');
+    const hasValidPassword = /^\d{8}$/.test(password);
 
-    // La contraseña debe ser exactamente 8 dígitos numéricos
-    const isValidPassword = /^\d{8}$/.test(password);
-
-    setTimeout(() => {
-      // Caso Liderman: correo debe terminar en @liderman.com
-      if (cleanId.endsWith('@liderman.com')) {
-        if (isValidPassword) {
-          setIsLoading(false);
-          onLoginSuccess(DEMO_LIDERMAN_USER);
-          return;
-        }
-        setIsLoading(false);
-        setErrorMessage('La contraseña debe ser un número de 8 dígitos.');
-        return;
-      }
-
-      // Caso Estudiante: correo debe terminar en @pucp.edu.pe
-      if (cleanId.endsWith('@pucp.edu.pe')) {
-        if (isValidPassword) {
-          setIsLoading(false);
-          onLoginSuccess({
-            ...DEMO_STUDENT_USER,
-            email: cleanId,
-            name: cleanId.split('@')[0],
-          });
-          return;
-        }
-        setIsLoading(false);
-        setErrorMessage('La contraseña debe ser un número de 8 dígitos.');
-        return;
-      }
-
-      setIsLoading(false);
+    if (!hasValidDomain) {
       setErrorMessage('El correo debe terminar en @pucp.edu.pe (estudiante) o @liderman.com (liderman).');
-    }, 450);
+      return;
+    }
+
+    if (!hasValidPassword) {
+      setErrorMessage('La contraseña debe ser un número de 8 dígitos.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      // Login real: se lo preguntamos al servidor (server/index.js / api/[...path].js).
+      const user = await api.login(cleanId, password);
+      setIsLoading(false);
+      onLoginSuccess(user);
+    } catch (err) {
+      setIsLoading(false);
+      setErrorMessage(
+        err instanceof Error ? err.message : 'No se pudo iniciar sesión. Intenta de nuevo.'
+      );
+    }
   };
 
   const handleQuickLogin = (role: UserRole) => {
