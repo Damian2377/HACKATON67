@@ -32,6 +32,7 @@ interface ProfileTabProps {
   buildings: Building[];
   userPoints?: number;
   userReportsCount?: number;
+  unlockedBadgeIds?: string[];
   onLogout?: () => void;
 }
 
@@ -44,6 +45,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   buildings,
   userPoints = 175,
   userReportsCount = 14,
+  unlockedBadgeIds = [],
   onLogout,
 }) => {
   const [alertsEnabled, setAlertsEnabled] = useState(true);
@@ -60,7 +62,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
   const studentBadges = ALL_BADGES.filter(
     (b) => b.targetRole === 'student' || b.targetRole === 'both'
   );
-  const unlockedCount = studentBadges.filter((b) => b.unlocked).length;
+  const unlockedCount = studentBadges.filter((b) => unlockedBadgeIds.includes(b.id)).length;
 
   // Level calculation: 0-75 (Nivel 1), 76-150 (Nivel 2), 151-250 (Nivel 3: Explorador), 251-400 (Nivel 4: Guardián), 400+ (Nivel 5: Héroe)
   const currentLevel = userPoints < 75 ? 1 : userPoints < 150 ? 2 : userPoints < 250 ? 3 : userPoints < 400 ? 4 : 5;
@@ -222,7 +224,7 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
         {/* Badges Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
           {studentBadges.map((badge) => {
-            const isUnlocked = badge.unlocked;
+            const isUnlocked = unlockedBadgeIds.includes(badge.id);
             return (
               <div
                 key={badge.id}
@@ -443,10 +445,8 @@ export const ProfileTab: React.FC<ProfileTabProps> = ({
             <div className="p-2.5 bg-amber-50 rounded-xl text-xs font-bold text-amber-900 border border-amber-200">
               Recompensa: +{selectedBadge.pointsReward} Puntos de Reputación
             </div>
-            {selectedBadge.unlocked && selectedBadge.unlockedAt && (
-              <p className="text-[11px] text-emerald-700 font-bold">
-                ✓ Desbloqueada el {selectedBadge.unlockedAt}
-              </p>
+            {unlockedBadgeIds.includes(selectedBadge.id) && (
+              <p className="text-[11px] text-emerald-700 font-bold">✓ Desbloqueada</p>
             )}
             <button
               onClick={() => setSelectedBadge(null)}

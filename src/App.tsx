@@ -1,12 +1,7 @@
-import React, { useState } from 'react';
-import { INITIAL_BUILDINGS, getStatusFromOccupancy } from './data/pucpCampus';
-import {
-  DEMO_STUDENT_USER,
-  DEMO_LIDERMAN_USER,
-  INITIAL_LIDERMAN_ROUNDS,
-  INITIAL_LIDERMAN_HISTORY,
-} from './data/authData';
-import { INITIAL_COMMUNITY_REPORTS } from './data/reportsData';
+import React, { useState, useEffect } from 'react';
+import { getStatusFromOccupancy } from './data/pucpCampus';
+import { DEMO_STUDENT_USER, DEMO_LIDERMAN_USER } from './data/authData';
+import { api } from './api';
 import {
   Building,
   Floor,
@@ -16,6 +11,7 @@ import {
   LidermanRound,
   LidermanReportItem,
   CommunityReport,
+  Badge,
 } from './types';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
@@ -30,30 +26,66 @@ import { ProfileTab } from './components/ProfileTab';
 import { NotificationDrawer } from './components/NotificationDrawer';
 import { LoginScreen } from './components/LoginScreen';
 import { LidermanLayout } from './components/liderman/LidermanLayout';
+import { BadgeUnlockModal } from './components/BadgeUnlockModal';
+import { ALL_BADGES } from './data/gamificationData';
 
 export default function App() {
   // Authentication state
-  const [currentUser, setCurrentUser] = useState<UserAccount | null>(DEMO_STUDENT_USER);
+  // Ahora arranca en null a propósito: así se ve la pantalla de login
+  // real (Parte 3), que ahora sí pregunta al servidor.
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
 
   // Student navigation tab
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
 
   // Campus Data state
-  const [buildings, setBuildings] = useState<Building[]>(INITIAL_BUILDINGS);
-  const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(INITIAL_BUILDINGS[0]);
+  // Arrancan vacíos: ya no usamos datos de ejemplo "quemados" en el código,
+  // los pedimos al servidor apenas se abre la app (ver useEffect más abajo).
+  const [buildings, setBuildings] = useState<Building[]>([]);
+  const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
   const [activeFloorDetail, setActiveFloorDetail] = useState<{ building: Building; floor: Floor } | null>(null);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Community Reports state
-  const [communityReports, setCommunityReports] = useState<CommunityReport[]>(INITIAL_COMMUNITY_REPORTS);
+  const [communityReports, setCommunityReports] = useState<CommunityReport[]>([]);
 
   // Liderman Operational state
-  const [lidermanRounds, setLidermanRounds] = useState<LidermanRound[]>(INITIAL_LIDERMAN_ROUNDS);
-  const [lidermanHistory, setLidermanHistory] = useState<LidermanReportItem[]>(INITIAL_LIDERMAN_HISTORY);
+  const [lidermanRounds, setLidermanRounds] = useState<LidermanRound[]>([]);
+  const [lidermanHistory, setLidermanHistory] = useState<LidermanReportItem[]>([]);
+
+  // Al montar la app, pedimos los datos reales al servidor (una sola vez).
+  // Esto reemplaza los datos "de ejemplo" que antes venían quemados en el código.
+  useEffect(() => {
+    Promise.all([
+      api.getBuildings(),
+      api.getReports(),
+      api.getLidermanRounds(),
+      api.getLidermanHistory(),
+    ])
+      .then(([bs, reports, rounds, history]) => {
+        setBuildings(bs);
+        setSelectedBuilding(bs[0] ?? null);
+        setCommunityReports(reports);
+        setLidermanRounds(rounds);
+        setLidermanHistory(history);
+      })
+      .catch((err) => {
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo conectar con el servidor. ¿Está corriendo "npm run server"?'
+        );
+      })
+      .finally(() => setIsLoadingData(false));
+  }, []);
 
   // Modals & Drawers
   const [isAiFinderOpen, setIsAiFinderOpen] = useState(false);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isPitchModalOpen, setIsPitchModalOpen] = useState(false);
+  // Insignia recién desbloqueada, si hay una pendiente de mostrar en un modal.
+  const [unlockedBadgeToShow, setUnlockedBadgeToShow] = useState<Badge | null>(null);
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState<number>(3);
 
@@ -90,74 +122,60 @@ export default function App() {
     setActiveFloorDetail({ building: currentB, floor: currentF });
   };
 
-  // Toggle Cubicle occupation status in real time
+  // Toggle Cubicle occupation status: se lo pedimos al servidor, y cuando
+  // nos responde con el edificio ya actualizado, reemplazamos ese edificio
+  // en nuestro estado local (así todos los que abran la app ven el cambio).
   const handleToggleCubicle = (cubicleId: string) => {
-    setBuildings((prev) =>
-      prev.map((b) => {
-        let buildingModified = false;
-        const newFloors = b.floors.map((f) => {
-          const cubicleIndex = f.cubicles.findIndex((c) => c.id === cubicleId);
-          if (cubicleIndex === -1) return f;
-
-          buildingModified = true;
-          const updatedCubicles = f.cubicles.map((c) => {
-            if (c.id === cubicleId) {
-              const nextState = !c.isOccupied;
-              return {
-                ...c,
-                isOccupied: nextState,
-                status: nextState ? 'saturated' : 'available',
-                occupiedUntil: nextState ? '18:00' : undefined,
-              };
-            }
-            return c;
-          });
-
-          return {
-            ...f,
-            cubicles: updatedCubicles,
-            lastUpdatedMinutesAgo: 0,
-          };
-        });
-
-        if (!buildingModified) return b;
-        return {
-          ...b,
-          floors: newFloors,
-          lastUpdatedMinutesAgo: 0,
-        };
-      })
+    const buildingWithCubicle = buildings.find((b) =>
+      b.floors.some((f) => f.cubicles.some((c) => c.id === cubicleId))
     );
+    if (!buildingWithCubicle) return;
 
-    if (activeFloorDetail) {
-      setActiveFloorDetail((prev) => {
-        if (!prev) return null;
-        const updatedB = buildings.find((b) => b.id === prev.building.id);
-        const updatedF = updatedB?.floors.find((f) => f.id === prev.floor.id);
-        return updatedB && updatedF ? { building: updatedB, floor: updatedF } : prev;
-      });
+    api
+      .toggleCubicle(buildingWithCubicle.id, cubicleId)
+      .then(({ building: updatedBuilding }) => {
+        setBuildings((prev) => prev.map((b) => (b.id === updatedBuilding.id ? updatedBuilding : b)));
+        setActiveFloorDetail((prev) => {
+          if (!prev || prev.building.id !== updatedBuilding.id) return prev;
+          const updatedFloor = updatedBuilding.floors.find((f) => f.id === prev.floor.id);
+          return updatedFloor ? { building: updatedBuilding, floor: updatedFloor } : prev;
+        });
+      })
+      .catch((err) => console.error('No se pudo actualizar el cubículo:', err));
+  };
+
+  // Toggle helpful vote on a community report: igual, se lo decimos al
+  // servidor y usamos su respuesta como la verdad final.
+  const handleToggleReportHelpful = (reportId: string) => {
+    api
+      .toggleHelpful(reportId)
+      .then((updatedReport) => {
+        setCommunityReports((prev) => prev.map((r) => (r.id === reportId ? updatedReport : r)));
+      })
+      .catch((err) => console.error('No se pudo registrar el voto:', err));
+  };
+
+  // Después de cualquier reporte (estudiante o liderman), le avisamos
+  // al servidor para que sume puntos y revise si se desbloqueó una
+  // insignia nueva. Si es así, actualizamos al usuario y mostramos el modal.
+  const awardPointsForReport = async () => {
+    if (!currentUser) return;
+    try {
+      const { user: updatedUser, newlyUnlocked } = await api.awardReportPoints(currentUser.id);
+      setCurrentUser(updatedUser);
+      if (newlyUnlocked.length > 0) {
+        const badgeInfo = ALL_BADGES.find((b) => b.id === newlyUnlocked[0]);
+        if (badgeInfo) setUnlockedBadgeToShow(badgeInfo);
+      }
+    } catch (err) {
+      console.error('No se pudieron actualizar los puntos:', err);
     }
   };
 
-  // Toggle helpful vote on a community report
-  const handleToggleReportHelpful = (reportId: string) => {
-    setCommunityReports((prev) =>
-      prev.map((r) => {
-        if (r.id === reportId) {
-          const isVoted = r.helpfulVotedByMe;
-          return {
-            ...r,
-            helpfulVotedByMe: !isVoted,
-            helpfulCount: isVoted ? Math.max(0, r.helpfulCount - 1) : r.helpfulCount + 1,
-          };
-        }
-        return r;
-      })
-    );
-  };
-
-  // Submit capacity report from student collaborative modal
-  const handleStudentReportSubmit = (
+  // Submit capacity report from student collaborative modal.
+  // Ahora hace DOS llamadas al servidor: 1) actualiza el piso, y
+  // 2) crea el reporte en el feed. Ambas quedan guardadas de verdad.
+  const handleStudentReportSubmit = async (
     buildingId: string,
     floorId: string,
     occupancyPercent: number,
@@ -166,46 +184,22 @@ export default function App() {
   ) => {
     const targetBuilding = buildings.find((b) => b.id === buildingId);
     const targetFloor = targetBuilding?.floors.find((f) => f.id === floorId);
+    if (!targetBuilding || !targetFloor) return;
 
-    setBuildings((prev) =>
-      prev.map((b) => {
-        if (b.id !== buildingId) return b;
+    try {
+      const { building: updatedBuilding } = await api.updateFloor(buildingId, floorId, {
+        occupancyPercent,
+        availablePlugs: plugsCount,
+      });
+      setBuildings((prev) => prev.map((b) => (b.id === updatedBuilding.id ? updatedBuilding : b)));
 
-        const updatedFloors = b.floors.map((f) => {
-          if (f.id !== floorId) return f;
-          return {
-            ...f,
-            occupancyPercent,
-            availablePlugs: plugsCount,
-            lastUpdatedMinutesAgo: 0,
-            occupiedSeats: Math.round((occupancyPercent / 100) * f.totalSeats),
-          };
-        });
-
-        const avg = Math.round(
-          updatedFloors.reduce((acc, curr) => acc + curr.occupancyPercent, 0) / updatedFloors.length
-        );
-
-        return {
-          ...b,
-          floors: updatedFloors,
-          generalOccupancyPercent: avg,
-          status: getStatusFromOccupancy(avg),
-          lastUpdatedMinutesAgo: 0,
-        };
-      })
-    );
-
-    // Also add to community reports feed
-    if (targetBuilding && targetFloor) {
-      const newReport: CommunityReport = {
-        id: `crep-${Date.now()}`,
+      const newReport = await api.addReport({
         userId: currentUser?.id || 'user-student-1',
         userName: currentUser?.name || 'Estudiante PUCP',
         userRole: 'student',
         userCode: currentUser?.code || '20214589',
-        userFaculty: currentUser?.faculty || 'Ingeniería Informática',
-        userAvatar: currentUser?.avatar || 'HV',
+        userFaculty: currentUser?.facultyOrUnit || 'Ingeniería Informática',
+        userAvatar: currentUser?.avatarInitials || 'HV',
         buildingId: targetBuilding.id,
         buildingName: targetBuilding.name,
         floorId: targetFloor.id,
@@ -217,116 +211,86 @@ export default function App() {
         availableComputers: targetFloor.availableComputers,
         availableCubicles: targetFloor.cubicles.filter((c) => !c.isOccupied).length,
         comment: note || `Reporte de aforo actualizado al ${occupancyPercent}%.`,
-        timestamp: 'Hace un momento',
-        createdAt: Date.now(),
-        verified: false,
-        helpfulCount: 0,
-        helpfulVotedByMe: false,
-      };
+      });
       setCommunityReports((prev) => [newReport, ...prev]);
+      await awardPointsForReport();
+    } catch (err) {
+      console.error('No se pudo enviar el reporte:', err);
     }
   };
 
-  // Submit official report from Liderman panel
-  const handleLidermanReportSubmit = (
+  // Submit official report from Liderman panel.
+  // Igual que el de estudiante: actualiza el piso en el servidor y
+  // guarda un registro en el historial del Liderman (server/db.json).
+  // La "ronda" (lidermanRounds) sí se queda local por ahora: es más
+  // como una lista de tareas de la sesión, no algo que otros deban ver.
+  const handleLidermanReportSubmit = async (
     reportData: Omit<LidermanReportItem, 'id' | 'date' | 'time' | 'supervisorChecked'>
   ) => {
-    const now = new Date();
-    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(
-      now.getMinutes()
-    ).padStart(2, '0')}`;
-
-    // 1. Update Campus building/floor state
-    setBuildings((prev) =>
-      prev.map((b) => {
-        if (b.id !== reportData.buildingId) return b;
-
-        const updatedFloors = b.floors.map((f) => {
-          if (f.id !== reportData.floorId) return f;
-          return {
-            ...f,
-            occupancyPercent: reportData.occupancyPercent,
-            availablePlugs: reportData.availablePlugs,
-            availableComputers: reportData.availableComputers,
-            lastUpdatedMinutesAgo: 0,
-            occupiedSeats: Math.round((reportData.occupancyPercent / 100) * f.totalSeats),
-          };
-        });
-
-        const avg = Math.round(
-          updatedFloors.reduce((acc, curr) => acc + curr.occupancyPercent, 0) / updatedFloors.length
-        );
-
-        return {
-          ...b,
-          floors: updatedFloors,
-          generalOccupancyPercent: avg,
-          status: getStatusFromOccupancy(avg),
-          lastUpdatedMinutesAgo: 0,
-        };
-      })
-    );
-
-    // 2. Update matching Liderman round to completed
-    setLidermanRounds((prev) => {
-      let matched = false;
-      const updated = prev.map((r) => {
-        if (
-          !matched &&
-          r.status === 'pending' &&
-          (r.buildingId === reportData.buildingId || !r.completedAt)
-        ) {
-          matched = true;
-          return {
-            ...r,
-            status: 'completed' as const,
-            completedAt: timeStr,
-            occupancyReported: reportData.occupancyPercent,
-          };
+    try {
+      const { building: updatedBuilding } = await api.updateFloor(
+        reportData.buildingId,
+        reportData.floorId,
+        {
+          occupancyPercent: reportData.occupancyPercent,
+          availablePlugs: reportData.availablePlugs,
+          availableComputers: reportData.availableComputers,
         }
-        return r;
+      );
+      setBuildings((prev) => prev.map((b) => (b.id === updatedBuilding.id ? updatedBuilding : b)));
+
+      // Marca la primera ronda pendiente como completada (esto sigue siendo local)
+      setLidermanRounds((prev) => {
+        const firstPendingIdx = prev.findIndex((r) => r.status === 'pending');
+        if (firstPendingIdx === -1) return prev;
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(
+          now.getMinutes()
+        ).padStart(2, '0')}`;
+        const updated = [...prev];
+        updated[firstPendingIdx] = {
+          ...updated[firstPendingIdx],
+          status: 'completed',
+          completedAt: timeStr,
+          occupancyReported: reportData.occupancyPercent,
+        };
+        return updated;
       });
 
-      // If no pending matched, mark the first pending round
-      if (!matched) {
-        const firstPendingIdx = updated.findIndex((r) => r.status === 'pending');
-        if (firstPendingIdx !== -1) {
-          updated[firstPendingIdx] = {
-            ...updated[firstPendingIdx],
-            status: 'completed' as const,
-            completedAt: timeStr,
-            occupancyReported: reportData.occupancyPercent,
-          };
-        }
-      }
-
-      return updated;
-    });
-
-    // 3. Add record to Liderman history
-    const newHistoryItem: LidermanReportItem = {
-      id: `rep-${Date.now()}`,
-      date: 'Hoy, 28 Ago',
-      time: timeStr,
-      buildingId: reportData.buildingId,
-      buildingName: reportData.buildingName,
-      floorId: reportData.floorId,
-      floorNumber: reportData.floorNumber,
-      zoneName: reportData.zoneName,
-      occupancyPercent: reportData.occupancyPercent,
-      statusLevel: reportData.statusLevel,
-      availablePlugs: reportData.availablePlugs,
-      availableComputers: reportData.availableComputers,
-      availableCubicles: reportData.availableCubicles,
-      notes: reportData.notes,
-      supervisorChecked: true,
-    };
-
-    setLidermanHistory((prev) => [newHistoryItem, ...prev]);
+      const newHistoryItem = await api.addLidermanHistory({
+        ...reportData,
+        supervisorChecked: true,
+      });
+      setLidermanHistory((prev) => [newHistoryItem, ...prev]);
+      await awardPointsForReport();
+    } catch (err) {
+      console.error('No se pudo enviar el reporte del Liderman:', err);
+    }
   };
 
   // Find reference for Biblioteca Central for Pitch Modal
   const biblioCentral = buildings.find((b) => b.id === 'biblio-central') || buildings[0];
+
+  // 0. MIENTRAS SE CARGAN LOS DATOS DEL SERVIDOR
+  if (isLoadingData) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500">
+        Cargando datos de AforoPUCP...
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-2 bg-slate-50 text-center px-6">
+        <p className="text-red-600 font-medium">No se pudo conectar con el servidor</p>
+        <p className="text-slate-500 text-sm">{loadError}</p>
+        <p className="text-slate-400 text-xs mt-2">
+          Recuerda correr <code>npm run server</code> en otra terminal.
+        </p>
+      </div>
+    );
+  }
 
   // 1. IF NOT LOGGED IN -> SHOW LOGIN SCREEN
   if (!currentUser) {
@@ -419,6 +383,9 @@ export default function App() {
             onSelectFloor={handleSelectFloor}
             buildings={buildings}
             onLogout={handleLogout}
+            userPoints={currentUser.gamification?.points}
+            userReportsCount={currentUser.gamification?.reportsCount}
+            unlockedBadgeIds={currentUser.gamification?.unlockedBadges}
           />
         )}
       </main>
@@ -481,6 +448,14 @@ export default function App() {
           onClose={() => setIsPitchModalOpen(false)}
           onOpenMap={handleOpenMapToBuilding}
           onSelectFloor={handleSelectFloor}
+        />
+      )}
+
+      {unlockedBadgeToShow && (
+        <BadgeUnlockModal
+          badge={unlockedBadgeToShow}
+          onClose={() => setUnlockedBadgeToShow(null)}
+          onViewAllBadges={() => setActiveTab('profile')}
         />
       )}
 

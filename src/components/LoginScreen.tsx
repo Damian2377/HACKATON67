@@ -17,7 +17,7 @@ import {
   Info,
 } from 'lucide-react';
 import { UserAccount, UserRole } from '../types';
-import { DEMO_STUDENT_USER, DEMO_LIDERMAN_USER } from '../data/authData';
+import { api } from '../api';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserAccount) => void;
@@ -34,11 +34,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    const cleanId = identifier.trim().toLowerCase();
+    const cleanId = identifier.trim();
 
     if (!cleanId) {
       setErrorMessage('Por favor ingresa tu correo institucional o usuario.');
@@ -52,71 +52,40 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
     setIsLoading(true);
 
-    setTimeout(() => {
-      // Check Liderman
-      if (
-        cleanId.includes('liderman') ||
-        cleanId === 'lid-40892' ||
-        cleanId === 'carlos.huaman@liderman.pucp.pe' ||
-        cleanId.startsWith('lid') ||
-        cleanId.includes('guardia')
-      ) {
-        if (password.length >= 4) {
-          setIsLoading(false);
-          onLoginSuccess(DEMO_LIDERMAN_USER);
-          return;
-        }
-      }
-
-      // Check Student
-      if (
-        cleanId.includes('pucp') ||
-        cleanId.includes('20214589') ||
-        cleanId === 'herny' ||
-        cleanId.startsWith('a20') ||
-        cleanId.includes('@')
-      ) {
-        if (password.length >= 4) {
-          setIsLoading(false);
-          onLoginSuccess(DEMO_STUDENT_USER);
-          return;
-        }
-      }
-
-      // If user typed custom student-like format
-      if (!cleanId.includes('liderman') && password.length >= 4) {
-        setIsLoading(false);
-        onLoginSuccess({
-          ...DEMO_STUDENT_USER,
-          email: cleanId.includes('@') ? cleanId : `${cleanId}@pucp.edu.pe`,
-          name: cleanId.split('@')[0],
-        });
-        return;
-      }
-
+    // Le preguntamos al servidor si ese código/correo + contraseña
+    // corresponden a un usuario real guardado en server/db.json.
+    try {
+      const user = await api.login(cleanId, password);
+      onLoginSuccess(user);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error
+          ? err.message
+          : 'Credenciales incorrectas. Verifica tu correo/código y contraseña.'
+      );
+    } finally {
       setIsLoading(false);
-      setErrorMessage('Credenciales incorrectas. Verifica tu correo o contraseña (mínimo 4 caracteres).');
-    }, 450);
+    }
   };
 
-  const handleQuickLogin = (role: UserRole) => {
+  // Botones de acceso rápido para pruebas: usan las mismas credenciales
+  // sembradas en server/db.json (ver scripts/seed.ts), y pasan por el
+  // mismo login real contra el servidor — no son un atajo que se salte
+  // la validación.
+  const handleQuickLogin = async (role: UserRole) => {
     setErrorMessage(null);
-    if (role === 'student') {
-      setIdentifier(DEMO_STUDENT_USER.email);
-      setPassword('pucp2024');
-      setIsLoading(true);
-      setTimeout(() => {
-        setIsLoading(false);
-        onLoginSuccess(DEMO_STUDENT_USER);
-      }, 300);
-    } else {
-      setIdentifier(DEMO_LIDERMAN_USER.email);
-      setPassword('liderman123');
-      setIsLoading(true);
-      setTimeout(() => {
-        setIsLoading(false);
-        onLoginSuccess(DEMO_LIDERMAN_USER);
-      }, 300);
+    const demoCode = role === 'student' ? '20214589' : 'LID-40892';
+    const demoPassword = role === 'student' ? 'pucp2024' : 'liderman2024';
+    setIdentifier(demoCode);
+    setPassword(demoPassword);
+    setIsLoading(true);
+    try {
+      const user = await api.login(demoCode, demoPassword);
+      onLoginSuccess(user);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'No se pudo iniciar sesión de prueba.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
