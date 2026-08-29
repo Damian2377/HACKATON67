@@ -20,7 +20,20 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, 'db.json');
+
+// En Vercel, el proyecto se sube "de solo lectura": no se puede escribir
+// dentro de la carpeta del proyecto. Por eso, cuando corre en Vercel,
+// usamos una copia del archivo en /tmp (la única carpeta donde Vercel sí
+// permite escribir). En tu compu (desarrollo local) sigue usando el
+// archivo normal de la carpeta server/, como siempre.
+const BUNDLED_DB_PATH = path.join(__dirname, 'db.json');
+const DB_PATH = process.env.VERCEL ? '/tmp/aforopucp-db.json' : BUNDLED_DB_PATH;
+
+function ensureDbExists() {
+  if (process.env.VERCEL && !fs.existsSync(DB_PATH)) {
+    fs.copyFileSync(BUNDLED_DB_PATH, DB_PATH);
+  }
+}
 
 const app = express();
 app.use(express.json()); // permite leer JSON en el "body" de las peticiones
@@ -37,10 +50,12 @@ app.use((req, res, next) => {
 
 // ---- "Base de datos" muy simple basada en un archivo JSON ----
 function readDb() {
+  ensureDbExists();
   const raw = fs.readFileSync(DB_PATH, 'utf-8');
   return JSON.parse(raw);
 }
 function writeDb(db) {
+  ensureDbExists();
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
@@ -248,7 +263,14 @@ app.post('/api/gamification/:userId/award-report', (req, res) => {
   res.json({ user: safeUser, newlyUnlocked });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`✅ Servidor de AforoPUCP escuchando en http://localhost:${PORT}`);
-});
+// En tu compu (npm run server) sí queremos que quede "escuchando".
+// En Vercel, en cambio, esta misma app se reutiliza como función
+// (ver /api/[...path].js), y NO debe llamar a listen().
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`✅ Servidor de AforoPUCP escuchando en http://localhost:${PORT}`);
+  });
+}
+
+export default app;
