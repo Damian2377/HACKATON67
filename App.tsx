@@ -31,6 +31,23 @@ import { NotificationDrawer } from './components/NotificationDrawer';
 import { LoginScreen } from './components/LoginScreen';
 import { LidermanLayout } from './components/liderman/LidermanLayout';
 
+const getExactPeruTime = () =>
+  new Date().toLocaleTimeString('es-PE', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'America/Lima',
+  });
+
+const getExactPeruDate = () =>
+  new Date().toLocaleDateString('es-PE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'America/Lima',
+  });
+
 export default function App() {
   // Authentication state
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
@@ -217,7 +234,7 @@ export default function App() {
         availableComputers: targetFloor.availableComputers,
         availableCubicles: targetFloor.cubicles.filter((c) => !c.isOccupied).length,
         comment: note || `Reporte de aforo actualizado al ${occupancyPercent}%.`,
-        timestamp: 'Hace un momento',
+        timestamp: getExactPeruTime(),
         createdAt: Date.now(),
         verified: false,
         helpfulCount: 0,
@@ -231,10 +248,8 @@ export default function App() {
   const handleLidermanReportSubmit = (
     reportData: Omit<LidermanReportItem, 'id' | 'date' | 'time' | 'supervisorChecked'>
   ) => {
-    const now = new Date();
-    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(
-      now.getMinutes()
-    ).padStart(2, '0')}`;
+    const timeStr = getExactPeruTime();
+    const dateStr = getExactPeruDate();
 
     // 1. Update Campus building/floor state
     setBuildings((prev) =>
@@ -306,7 +321,7 @@ export default function App() {
     // 3. Add record to Liderman history
     const newHistoryItem: LidermanReportItem = {
       id: `rep-${Date.now()}`,
-      date: 'Hoy, 28 Ago',
+      date: dateStr,
       time: timeStr,
       buildingId: reportData.buildingId,
       buildingName: reportData.buildingName,
