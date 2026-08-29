@@ -1160,12 +1160,12 @@
           "explorer"
         ]
       },
-      "password": "pucp2024"
+      "password": "20214589"
     },
     {
       "id": "user-liderman-1",
       "name": "Oficial Carlos Huamán Quispe",
-      "email": "carlos.huaman@liderman.pucp.pe",
+      "email": "carlos.huaman@liderman.com",
       "role": "liderman",
       "code": "LID-40892",
       "facultyOrUnit": "Seguridad y Vigilancia Campus PUCP",
@@ -1189,7 +1189,7 @@
           "campus_guardian"
         ]
       },
-      "password": "liderman2024"
+      "password": "40892000"
     }
   ]
 }
