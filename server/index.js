@@ -1,45 +1,140 @@
 // ============================================================
 // SERVIDOR (backend) de AforoPUCP
 // ------------------------------------------------------------
-// ¿Por qué existe esto? Antes, todos los datos (edificios,
-// reportes, usuarios) vivían solo en la memoria del navegador
-// de cada persona. Este archivo es un programa aparte que:
-//   1) Guarda los datos en un archivo (server/db.json), como
-//      si fuera una hoja de cálculo compartida.
-//   2) Expone "endpoints" (direcciones URL) para que el
-//      aplicativo (el frontend) pueda leer y modificar esos
-//      datos mediante peticiones HTTP (fetch).
-// Así, cuando un estudiante reporta el aforo desde su celular,
-// ese cambio se guarda aquí, y CUALQUIER otro celular que
-// pregunte por los datos verá el cambio.
+// La aplicación mantiene la misma API y la misma lógica del
+// proyecto. En Render, los datos persistentes se guardan en
+// PostgreSQL mediante DATABASE_URL.
+// En desarrollo local, si no existe DATABASE_URL, se conserva
+// server/db.json para poder trabajar sin configurar Render.
 // ============================================================
 
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import pg from 'pg';
 
+const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// En Vercel, el proyecto se sube "de solo lectura": no se puede escribir
-// dentro de la carpeta del proyecto. Por eso, cuando corre en Vercel,
-// usamos una copia del archivo en /tmp (la única carpeta donde Vercel sí
-// permite escribir). En tu compu (desarrollo local) sigue usando el
-// archivo normal de la carpeta server/, como siempre.
 const BUNDLED_DB_PATH = path.join(__dirname, 'db.json');
-const DB_PATH = process.env.VERCEL ? '/tmp/aforopucp-db.json' : BUNDLED_DB_PATH;
+const usePostgres = !!process.env.DATABASE_URL;
 
-function ensureDbExists() {
-  if (process.env.VERCEL && !fs.existsSync(DB_PATH)) {
-    fs.copyFileSync(BUNDLED_DB_PATH, DB_PATH);
+// Render/PostgreSQL necesita SSL en conexiones externas.
+// En desarrollo local, PostgreSQL puede funcionar sin SSL.
+const pool = usePostgres
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+      max: 5,
+    })
+  : null;
+
+let databaseReadyPromise = null;
+
+function readLocalDb() {
+  return JSON.parse(fs.readFileSync(BUNDLED_DB_PATH, 'utf-8'));
+}
+
+function writeLocalDb(db) {
+  fs.writeFileSync(BUNDLED_DB_PATH, JSON.stringify(db, null, 2));
+}
+
+async function ensurePostgres() {
+  if (!pool) return;
+  if (!databaseReadyPromise) {
+    databaseReadyPromise = (async () => {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS aforopucp_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          data JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+
+      const existing = await pool.query(
+        'SELECT id FROM aforopucp_state WHERE id = 1'
+      );
+
+      // Primera ejecución: toma los datos iniciales que ya vienen
+      // en server/db.json y los coloca en PostgreSQL.
+      if (existing.rowCount === 0) {
+        const initialDb = readLocalDb();
+        await pool.query(
+          `INSERT INTO aforopucp_state (id, data) VALUES (1, $1::jsonb)
+           ON CONFLICT (id) DO NOTHING`,
+          [JSON.stringify(initialDb)]
+        );
+      }
+    })().catch((error) => {
+      databaseReadyPromise = null;
+      throw error;
+    });
+  }
+
+  await databaseReadyPromise;
+}
+
+async function readDb() {
+  if (!pool) return readLocalDb();
+
+  await ensurePostgres();
+  const result = await pool.query(
+    'SELECT data FROM aforopucp_state WHERE id = 1'
+  );
+
+  if (result.rowCount === 0) {
+    throw new Error('No se pudo inicializar la base de datos de AforoPUCP.');
+  }
+
+  return result.rows[0].data;
+}
+
+// Ejecuta una modificación dentro de una transacción y bloquea la
+// fila mientras se modifica. Esto evita que dos reportes enviados
+// casi al mismo tiempo se pisen entre sí.
+async function updateDb(mutator) {
+  if (!pool) {
+    const db = readLocalDb();
+    const result = await mutator(db);
+    writeLocalDb(db);
+    return result;
+  }
+
+  await ensurePostgres();
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      'SELECT data FROM aforopucp_state WHERE id = 1 FOR UPDATE'
+    );
+
+    const db = result.rows[0].data;
+    const mutationResult = await mutator(db);
+
+    await client.query(
+      `UPDATE aforopucp_state
+       SET data = $1::jsonb, updated_at = NOW()
+       WHERE id = 1`,
+      [JSON.stringify(db)]
+    );
+
+    await client.query('COMMIT');
+    return mutationResult;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
 const app = express();
-app.use(express.json()); // permite leer JSON en el "body" de las peticiones
+app.use(express.json({ limit: '2mb' }));
 
-// Permite que el frontend (que corre en otro puerto durante el desarrollo)
-// pueda hacerle peticiones a este servidor sin que el navegador las bloquee.
+// Permite que el frontend pueda comunicarse con este servidor.
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
@@ -48,187 +143,232 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---- "Base de datos" muy simple basada en un archivo JSON ----
-function readDb() {
-  ensureDbExists();
-  const raw = fs.readFileSync(DB_PATH, 'utf-8');
-  return JSON.parse(raw);
-}
-function writeDb(db) {
-  ensureDbExists();
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-}
-
 // Recalcula el % general de un edificio a partir de sus pisos.
 function recalcBuildingOccupancy(building) {
   const avg = Math.round(
-    building.floors.reduce((acc, f) => acc + f.occupancyPercent, 0) / building.floors.length
+    building.floors.reduce((acc, f) => acc + f.occupancyPercent, 0) /
+      building.floors.length
   );
   building.generalOccupancyPercent = avg;
-  building.status = avg >= 85 ? 'saturated' : avg >= 50 ? 'moderate' : 'available';
+  building.status =
+    avg >= 85 ? 'saturated' : avg >= 50 ? 'moderate' : 'available';
   building.lastUpdatedMinutesAgo = 0;
   return building;
 }
 
 // ---------------- EDIFICIOS Y PISOS ----------------
 
-// Obtener todos los edificios (con sus pisos y cubículos)
-app.get('/api/buildings', (req, res) => {
-  const db = readDb();
-  res.json(db.buildings);
-});
-
-// Actualizar el aforo de un piso (lo usa: reporte de estudiante y de liderman)
-app.put('/api/buildings/:buildingId/floors/:floorId', (req, res) => {
-  const { buildingId, floorId } = req.params;
-  const updates = req.body; // ej: { occupancyPercent, availablePlugs, availableComputers }
-
-  const db = readDb();
-  const building = db.buildings.find((b) => b.id === buildingId);
-  if (!building) return res.status(404).json({ error: 'Edificio no encontrado' });
-
-  const floor = building.floors.find((f) => f.id === floorId);
-  if (!floor) return res.status(404).json({ error: 'Piso no encontrado' });
-
-  Object.assign(floor, updates);
-  if (updates.occupancyPercent !== undefined) {
-    floor.occupiedSeats = Math.round((updates.occupancyPercent / 100) * floor.totalSeats);
+app.get('/api/buildings', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json(db.buildings);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudieron cargar los edificios' });
   }
-  floor.lastUpdatedMinutesAgo = 0;
-
-  recalcBuildingOccupancy(building);
-  writeDb(db);
-  res.json({ building, floor });
 });
 
-// Prender/apagar un cubículo puntual
-app.put('/api/buildings/:buildingId/cubicles/:cubicleId/toggle', (req, res) => {
-  const { buildingId, cubicleId } = req.params;
-  const db = readDb();
-  const building = db.buildings.find((b) => b.id === buildingId);
-  if (!building) return res.status(404).json({ error: 'Edificio no encontrado' });
+app.put('/api/buildings/:buildingId/floors/:floorId', async (req, res) => {
+  try {
+    const { buildingId, floorId } = req.params;
+    const updates = req.body;
 
-  let updatedCubicle = null;
-  for (const floor of building.floors) {
-    const cubicle = floor.cubicles.find((c) => c.id === cubicleId);
-    if (cubicle) {
-      cubicle.isOccupied = !cubicle.isOccupied;
-      cubicle.status = cubicle.isOccupied ? 'saturated' : 'available';
-      cubicle.occupiedUntil = cubicle.isOccupied ? '18:00' : undefined;
+    const result = await updateDb((db) => {
+      const building = db.buildings.find((b) => b.id === buildingId);
+      if (!building) return { error: 'Edificio no encontrado', status: 404 };
+
+      const floor = building.floors.find((f) => f.id === floorId);
+      if (!floor) return { error: 'Piso no encontrado', status: 404 };
+
+      Object.assign(floor, updates);
+      if (updates.occupancyPercent !== undefined) {
+        floor.occupiedSeats = Math.round(
+          (updates.occupancyPercent / 100) * floor.totalSeats
+        );
+      }
       floor.lastUpdatedMinutesAgo = 0;
-      updatedCubicle = cubicle;
-    }
-  }
-  if (!updatedCubicle) return res.status(404).json({ error: 'Cubículo no encontrado' });
 
-  writeDb(db);
-  res.json({ building });
+      recalcBuildingOccupancy(building);
+      return { building, floor };
+    });
+
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo actualizar el piso' });
+  }
+});
+
+app.put('/api/buildings/:buildingId/cubicles/:cubicleId/toggle', async (req, res) => {
+  try {
+    const { buildingId, cubicleId } = req.params;
+
+    const result = await updateDb((db) => {
+      const building = db.buildings.find((b) => b.id === buildingId);
+      if (!building) return { error: 'Edificio no encontrado', status: 404 };
+
+      let updatedCubicle = null;
+      for (const floor of building.floors) {
+        const cubicle = floor.cubicles.find((c) => c.id === cubicleId);
+        if (cubicle) {
+          cubicle.isOccupied = !cubicle.isOccupied;
+          cubicle.status = cubicle.isOccupied ? 'saturated' : 'available';
+          cubicle.occupiedUntil = cubicle.isOccupied ? '18:00' : undefined;
+          floor.lastUpdatedMinutesAgo = 0;
+          updatedCubicle = cubicle;
+        }
+      }
+
+      if (!updatedCubicle)
+        return { error: 'Cubículo no encontrado', status: 404 };
+
+      return { building };
+    });
+
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo actualizar el cubículo' });
+  }
 });
 
 // ---------------- REPORTES DE LA COMUNIDAD ----------------
 
-app.get('/api/reports', (req, res) => {
-  const db = readDb();
-  res.json(db.communityReports);
+app.get('/api/reports', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json(db.communityReports);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudieron cargar los reportes' });
+  }
 });
 
-app.post('/api/reports', (req, res) => {
-  const db = readDb();
-  const newReport = {
-    id: `crep-${Date.now()}`,
-    createdAt: Date.now(),
-    timestamp: 'Hace un momento',
-    verified: false,
-    helpfulCount: 0,
-    helpfulVotedByMe: false,
-    ...req.body,
-  };
-  db.communityReports.unshift(newReport);
-  writeDb(db);
-  res.status(201).json(newReport);
+app.post('/api/reports', async (req, res) => {
+  try {
+    const result = await updateDb((db) => {
+      const newReport = {
+        id: `crep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: Date.now(),
+        timestamp: 'Hace un momento',
+        verified: false,
+        helpfulCount: 0,
+        helpfulVotedByMe: false,
+        ...req.body,
+      };
+
+      db.communityReports.unshift(newReport);
+      return newReport;
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo guardar el reporte' });
+  }
 });
 
-app.post('/api/reports/:id/helpful', (req, res) => {
-  const db = readDb();
-  const report = db.communityReports.find((r) => r.id === req.params.id);
-  if (!report) return res.status(404).json({ error: 'Reporte no encontrado' });
+app.post('/api/reports/:id/helpful', async (req, res) => {
+  try {
+    const result = await updateDb((db) => {
+      const report = db.communityReports.find((r) => r.id === req.params.id);
+      if (!report) return { error: 'Reporte no encontrado', status: 404 };
 
-  const wasVoted = !!report.helpfulVotedByMe;
-  report.helpfulVotedByMe = !wasVoted;
-  report.helpfulCount = wasVoted ? Math.max(0, report.helpfulCount - 1) : report.helpfulCount + 1;
+      const wasVoted = !!report.helpfulVotedByMe;
+      report.helpfulVotedByMe = !wasVoted;
+      report.helpfulCount = wasVoted
+        ? Math.max(0, report.helpfulCount - 1)
+        : report.helpfulCount + 1;
 
-  writeDb(db);
-  res.json(report);
+      return report;
+    });
+
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo actualizar el voto' });
+  }
 });
 
 // ---------------- LOGIN ----------------
 
-app.post('/api/login', (req, res) => {
-  const { code, password } = req.body;
-  const cleanId = String(code || '').trim().toLowerCase();
-  const cleanPassword = String(password || '');
+app.post('/api/login', async (req, res) => {
+  try {
+    const { code, password } = req.body;
+    const cleanCode = String(code || '').trim().toLowerCase();
+    const db = await readDb();
 
-  // La contraseña siempre debe ser un número de exactamente 8 dígitos.
-  const isValidPassword = /^\d{8}$/.test(cleanPassword);
-  if (!isValidPassword) {
-    return res.status(401).json({ error: 'La contraseña debe ser un número de 8 dígitos.' });
-  }
+    const user = db.users.find(
+      (u) =>
+        (u.code.toLowerCase() === cleanCode ||
+          u.email.toLowerCase() === cleanCode) &&
+        u.password === password
+    );
 
-  const db = readDb();
+    if (!user) {
+      return res.status(401).json({ error: 'Código o contraseña incorrectos' });
+    }
 
-  // Correo @liderman.com -> entra como Liderman
-  if (cleanId.endsWith('@liderman.com')) {
-    const user = db.users.find((u) => u.role === 'liderman');
-    if (!user) return res.status(404).json({ error: 'No se encontró un usuario Liderman en la base de datos.' });
     const { password: _omit, ...safeUser } = user;
-    return res.json(safeUser);
+    res.json(safeUser);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo iniciar sesión' });
   }
-
-  // Correo @pucp.edu.pe -> entra como Estudiante
-  if (cleanId.endsWith('@pucp.edu.pe')) {
-    const user = db.users.find((u) => u.role === 'student');
-    if (!user) return res.status(404).json({ error: 'No se encontró un usuario estudiante en la base de datos.' });
-    const { password: _omit, ...safeUser } = user;
-    return res.json({ ...safeUser, email: cleanId, name: cleanId.split('@')[0] });
-  }
-
-  return res.status(401).json({
-    error: 'El correo debe terminar en @pucp.edu.pe (estudiante) o @liderman.com (liderman).',
-  });
 });
 
 // ---------------- LIDERMAN ----------------
 
-app.get('/api/liderman/rounds', (req, res) => {
-  const db = readDb();
-  res.json(db.lidermanRounds);
+app.get('/api/liderman/rounds', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json(db.lidermanRounds);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudieron cargar las rondas' });
+  }
 });
 
-app.get('/api/liderman/history', (req, res) => {
-  const db = readDb();
-  res.json(db.lidermanHistory);
+app.get('/api/liderman/history', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json(db.lidermanHistory);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo cargar el historial' });
+  }
 });
 
-app.post('/api/liderman/history', (req, res) => {
-  const db = readDb();
-  const now = new Date();
-  const newEntry = {
-    id: `lrep-${Date.now()}`,
-    date: now.toISOString().slice(0, 10),
-    time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
-    supervisorChecked: false,
-    ...req.body,
-  };
-  db.lidermanHistory.unshift(newEntry);
-  writeDb(db);
-  res.status(201).json(newEntry);
+app.post('/api/liderman/history', async (req, res) => {
+  try {
+    const result = await updateDb((db) => {
+      const now = new Date();
+      const newEntry = {
+        id: `lrep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        date: now.toISOString().slice(0, 10),
+        time: `${String(now.getHours()).padStart(2, '0')}:${String(
+          now.getMinutes()
+        ).padStart(2, '0')}`,
+        supervisorChecked: false,
+        ...req.body,
+      };
+
+      db.lidermanHistory.unshift(newEntry);
+      return newEntry;
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo guardar el reporte de Liderman' });
+  }
 });
 
-// ---------------- GAMIFICACIÓN (puntos e insignias) ----------------
+// ---------------- GAMIFICACIÓN ----------------
 
-// Reglas de insignias: solo lo mínimo que el servidor necesita para
-// decidir si desbloquea una. El nombre/ícono/descripción de cada una
-// vive en el frontend (src/data/gamificationData.ts), para mostrarlas.
 const BADGE_RULES = [
   { id: 'first_report', targetRole: 'student', requiredCount: 1, pointsReward: 15 },
   { id: 'plug_hunter', targetRole: 'student', requiredCount: 5, pointsReward: 25 },
@@ -246,48 +386,74 @@ const BADGE_RULES = [
 
 const POINTS_PER_REPORT = 10;
 
-// Se llama justo después de guardar un reporte (estudiante o liderman).
-// Suma puntos, sube el contador de reportes, y revisa si con ese nuevo
-// conteo se desbloquea alguna insignia nueva.
-app.post('/api/gamification/:userId/award-report', (req, res) => {
-  const db = readDb();
-  const user = db.users.find((u) => u.id === req.params.userId);
-  if (!user || !user.gamification) {
-    return res.status(404).json({ error: 'Usuario no encontrado' });
+app.post('/api/gamification/:userId/award-report', async (req, res) => {
+  try {
+    const result = await updateDb((db) => {
+      const user = db.users.find((u) => u.id === req.params.userId);
+      if (!user || !user.gamification) {
+        return { error: 'Usuario no encontrado', status: 404 };
+      }
+
+      const gam = user.gamification;
+      gam.reportsCount += 1;
+      gam.points += POINTS_PER_REPORT;
+      gam.dailyPointsEarned = Math.min(
+        gam.dailyPointsMax,
+        gam.dailyPointsEarned + POINTS_PER_REPORT
+      );
+
+      const newlyUnlocked = [];
+      for (const rule of BADGE_RULES) {
+        const appliesToUser =
+          rule.targetRole === 'both' || rule.targetRole === user.role;
+        const alreadyUnlocked = gam.unlockedBadges.includes(rule.id);
+
+        if (
+          appliesToUser &&
+          !alreadyUnlocked &&
+          gam.reportsCount >= rule.requiredCount
+        ) {
+          gam.unlockedBadges.push(rule.id);
+          gam.points += rule.pointsReward;
+          newlyUnlocked.push(rule.id);
+        }
+      }
+
+      gam.level = 1 + Math.floor(gam.points / 100);
+
+      const { password: _omit, ...safeUser } = user;
+      return { user: safeUser, newlyUnlocked };
+    });
+
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'No se pudo actualizar la gamificación' });
   }
-
-  const gam = user.gamification;
-  gam.reportsCount += 1;
-  gam.points += POINTS_PER_REPORT;
-  gam.dailyPointsEarned = Math.min(gam.dailyPointsMax, gam.dailyPointsEarned + POINTS_PER_REPORT);
-
-  const newlyUnlocked = [];
-  for (const rule of BADGE_RULES) {
-    const appliesToUser = rule.targetRole === 'both' || rule.targetRole === user.role;
-    const alreadyUnlocked = gam.unlockedBadges.includes(rule.id);
-    if (appliesToUser && !alreadyUnlocked && gam.reportsCount >= rule.requiredCount) {
-      gam.unlockedBadges.push(rule.id);
-      gam.points += rule.pointsReward;
-      newlyUnlocked.push(rule.id);
-    }
-  }
-
-  // Nivel simple: sube uno cada 100 puntos.
-  gam.level = 1 + Math.floor(gam.points / 100);
-
-  writeDb(db);
-  const { password: _omit, ...safeUser } = user;
-  res.json({ user: safeUser, newlyUnlocked });
 });
 
-// En tu compu (npm run server) sí queremos que quede "escuchando".
-// En Vercel, en cambio, esta misma app se reutiliza como función
-// (ver /api/[...path].js), y NO debe llamar a listen().
-if (!process.env.VERCEL) {
-  const PORT = process.env.PORT || 3001;
-  app.listen(PORT, () => {
-    console.log(`✅ Servidor de AforoPUCP escuchando en http://localhost:${PORT}`);
-  });
+// ---------------- ARRANQUE ----------------
+
+async function start() {
+  // En Render, comprobamos que PostgreSQL esté disponible antes
+  // de empezar a aceptar tráfico.
+  if (pool) {
+    await ensurePostgres();
+    console.log('✅ PostgreSQL de Render conectado.');
+  }
+
+  if (!process.env.VERCEL) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => {
+      console.log(`✅ Servidor de AforoPUCP escuchando en http://localhost:${PORT}`);
+    });
+  }
 }
+
+start().catch((error) => {
+  console.error('❌ Error iniciando el servidor:', error);
+  if (process.env.NODE_ENV === 'production') process.exit(1);
+});
 
 export default app;
