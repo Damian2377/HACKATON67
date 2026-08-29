@@ -15,7 +15,7 @@ export const DEMO_STUDENT_USER: UserAccount = {
 export const DEMO_LIDERMAN_USER: UserAccount = {
   id: 'user-liderman-1',
   name: 'Oficial Carlos Huamán Quispe',
-  email: 'carlos.huaman@liderman.pucp.pe',
+  email: 'carlos.huaman@liderman.com',
   role: 'liderman',
   code: 'LID-40892',
   facultyOrUnit: 'Seguridad y Vigilancia Campus PUCP',
