@@ -17,7 +17,7 @@ import {
   Info,
 } from 'lucide-react';
 import { UserAccount, UserRole } from '../types';
-import { api } from '../api';
+import { DEMO_STUDENT_USER, DEMO_LIDERMAN_USER } from '../data/authData';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: UserAccount) => void;
@@ -34,11 +34,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [forgotEmail, setForgotEmail] = useState('');
   const [forgotSent, setForgotSent] = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
-    const cleanId = identifier.trim();
+    const cleanId = identifier.trim().toLowerCase();
 
     if (!cleanId) {
       setErrorMessage('Por favor ingresa tu correo institucional o usuario.');
@@ -52,40 +52,61 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
     setIsLoading(true);
 
-    // Le preguntamos al servidor si ese código/correo + contraseña
-    // corresponden a un usuario real guardado en server/db.json.
-    try {
-      const user = await api.login(cleanId, password);
-      onLoginSuccess(user);
-    } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : 'Credenciales incorrectas. Verifica tu correo/código y contraseña.'
-      );
-    } finally {
+    // La contraseña debe ser exactamente 8 dígitos numéricos
+    const isValidPassword = /^\d{8}$/.test(password);
+
+    setTimeout(() => {
+      // Caso Liderman: correo debe terminar en @liderman.com
+      if (cleanId.endsWith('@liderman.com')) {
+        if (isValidPassword) {
+          setIsLoading(false);
+          onLoginSuccess(DEMO_LIDERMAN_USER);
+          return;
+        }
+        setIsLoading(false);
+        setErrorMessage('La contraseña debe ser un número de 8 dígitos.');
+        return;
+      }
+
+      // Caso Estudiante: correo debe terminar en @pucp.edu.pe
+      if (cleanId.endsWith('@pucp.edu.pe')) {
+        if (isValidPassword) {
+          setIsLoading(false);
+          onLoginSuccess({
+            ...DEMO_STUDENT_USER,
+            email: cleanId,
+            name: cleanId.split('@')[0],
+          });
+          return;
+        }
+        setIsLoading(false);
+        setErrorMessage('La contraseña debe ser un número de 8 dígitos.');
+        return;
+      }
+
       setIsLoading(false);
-    }
+      setErrorMessage('El correo debe terminar en @pucp.edu.pe (estudiante) o @liderman.com (liderman).');
+    }, 450);
   };
 
-  // Botones de acceso rápido para pruebas: usan las mismas credenciales
-  // sembradas en server/db.json (ver scripts/seed.ts), y pasan por el
-  // mismo login real contra el servidor — no son un atajo que se salte
-  // la validación.
-  const handleQuickLogin = async (role: UserRole) => {
+  const handleQuickLogin = (role: UserRole) => {
     setErrorMessage(null);
-    const demoCode = role === 'student' ? '20214589' : 'LID-40892';
-    const demoPassword = role === 'student' ? 'pucp2024' : 'liderman2024';
-    setIdentifier(demoCode);
-    setPassword(demoPassword);
-    setIsLoading(true);
-    try {
-      const user = await api.login(demoCode, demoPassword);
-      onLoginSuccess(user);
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'No se pudo iniciar sesión de prueba.');
-    } finally {
-      setIsLoading(false);
+    if (role === 'student') {
+      setIdentifier(DEMO_STUDENT_USER.email);
+      setPassword('20214589');
+      setIsLoading(true);
+      setTimeout(() => {
+        setIsLoading(false);
+        onLoginSuccess(DEMO_STUDENT_USER);
+      }, 300);
+    } else {
+      setIdentifier(DEMO_LIDERMAN_USER.email);
+      setPassword('40892000');
+      setIsLoading(true);
+      setTimeout(() => {
+        setIsLoading(false);
+        onLoginSuccess(DEMO_LIDERMAN_USER);
+      }, 300);
     }
   };
 
@@ -247,7 +268,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                     setIdentifier(e.target.value);
                     if (errorMessage) setErrorMessage(null);
                   }}
-                  placeholder="ej. a20214589@pucp.edu.pe o lid-4089"
+                  placeholder="ej. a20214589@pucp.edu.pe o usuario@liderman.com"
                   className="w-full pl-10 pr-4 py-3 bg-slate-900/90 border border-slate-700 focus:border-cyan-400 focus:ring-2 focus:ring-cyan-500/20 rounded-2xl text-xs sm:text-sm text-white placeholder:text-slate-500 font-medium transition-all focus:outline-none"
                   autoComplete="username"
                 />
@@ -283,7 +304,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                     setPassword(e.target.value);
                     if (errorMessage) setErrorMessage(null);
                   }}
-                  placeholder="••••••••"
+                  placeholder="8 dígitos, ej. 12345678"
+                  inputMode="numeric"
+                  maxLength={8}
                   className="w-full pl-10 pr-11 py-3 bg-slate-900/90 border border-slate-700 focus:border-cyan-400 focus:ring-2 focus:ring-cyan-500/20 rounded-2xl text-xs sm:text-sm text-white placeholder:text-slate-500 font-medium transition-all focus:outline-none"
                   autoComplete="current-password"
                 />
